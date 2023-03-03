@@ -1,139 +1,193 @@
 
-use std::collections::{HashMap, HashSet};
-use math::round::floor;
-use std::iter::{Iterator, Filter};
-
-use lending_iterator::prelude::*;
+use std::collections::{HashMap, hash_map};
+use std::iter::Iterator;
+use std::fmt::Debug;
 
 use bevy::{
     prelude::*,
     math::{vec2, ivec2},
 };
 
+// TODO: Better names
+// TODO: Decouple this from bevy by making IVec2 and Vec2 usages generic somehow?
 
-// TODO: How can we make the iterator general such that it can:
-// - Use an arbitrary function to walk grid cells
-// - Use an arbitrary function to check for reachability of individual entities?
-//
-// (a) Could pass closures -> bad, causes extra allocation!
-// (b) function pointers and then some "userdata" passed along? -> ugly!
-// (c) Implement various iterators
-//     can that be made in a way that is not a lot of code overhead?
+#[derive(Debug, Clone, Copy)]
+pub struct Grid {
+    // TODO: Currently we happily copy this around,
+    // if this should become bigger (i.e includes boundaries etc.. instead we should pass
+    // reference to it)
+    pub spacing: f32
+}
 
-trait QueryRange {
-    fn first_cell(&self) -> IVec2;
-    fn next_cell(&self, cell: IVec2) -> Option<IVec2>;
+impl Grid {
+
+    fn index1d(&self, ordinate: f32) -> i32 {
+        (ordinate / self.spacing).floor() as i32
+    }
+
+    fn position1d_low(&self, index: i32) -> f32 {
+        (index as f32) * self.spacing
+    }
+
+    fn index2d(&self, position: Vec2) -> IVec2 {
+        ivec2(
+            self.index1d(position.x),
+            self.index1d(position.y)
+        )
+    }
+}
+
+pub trait Query: Debug {
+    fn first_cell(&self, grid: Grid) -> IVec2;
+    fn next_cell(&self, cell: IVec2, grid: Grid) -> Option<IVec2>;
     fn in_range(&self, position: Vec2) -> bool;
 }
 
-
-struct SpatialHashmapIterator<R: QueryRange, I: Iterator<Item = Entity>> {
-    query_range: R,
-    //top_left_grid_index: IVec2,
-    //bottom_right_grid_index: IVec2,
-
-    current_cell: IVec2,
-    //entity_iterator: HashMap<Vec2, Entity>::Iterator,
-    //entity_iterator: Filter< HashMap<Vec2, Entity>::Iter, R::in_range >,
-    
-    // This iterator should actually be a Filter that uses
-    // self.query_range.in_range.
-    // https://doc.rust-lang.org/std/iter/struct.Filter.html
-    // Can we even do this? How do we initialize this thing?
-    entity_iterator: I,
+#[derive(Debug, Default)]
+pub struct SquareQuery {
+    center: Vec2,
+    radius: f32,
 }
 
+impl SquareQuery {
+    pub fn new(center: Vec2, radius: f32) -> Self {
+        Self { center, radius }
+    }
+}
 
-impl Iterator for SpatialHashmapIterator {
-    type Item = Entity;
+impl Query for SquareQuery {
 
-    /*
-        for ix in round(position.0 - radius) .. round(position.0 + radius) {
-            for iy in round(position.1 - radius) .. round(position.1 + radius) {
-                if let Some(points) = self.hashmap.get(ivec2(ix, iy)) {
-                    for point in points {
-                        if point_in_square(position, 
-            } // iy
-        } // ix
-    */
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some((_, entity)) = self.entity_iterator.next() {
-            return entity;
+    fn first_cell(&self, grid: Grid) -> IVec2 {
+        grid.index2d(self.center - vec2(self.radius, self.radius))
+    }
+
+    fn next_cell(&self, mut cell_index: IVec2, grid: Grid) -> Option<IVec2> {
+        cell_index.x += 1;
+
+        if grid.position1d_low(cell_index.x) > self.center.x + self.radius {
+            cell_index.x = grid.index1d(self.center.x - self.radius);
+            cell_index.y += 1;
         }
 
-        if let Some(next_cell) = self.query_range.next_cell(self.current_cell) {
-            self.current_cell = next_cell;
-            // TODO assert current cell exists in shm?
-            // XXX
-            self.entity_iterator = Self::I(self.shm.get(self.current_cell).iter());
-            return self.next();
+        if grid.position1d_low(cell_index.y) > self.center.y + self.radius {
+            return None;
         }
 
+        Some(cell_index)
+    }
 
-        // ----
-
-        // Increment x position of cell until..
-        // position is out of range -> continue with y position
-        // A non-empty cell is found -> yield entities from that cell
-
-        'y: loop {
-            'x: loop {
-                self.grid_index.0 += 1;
-
-                if !grid_index_in_range(grid_index) {
-                    break 'x; // proceed with next y coordinate
-                }
-                if let Some(cell_entities) = self.hashmap.get(self.grid_index) {
-                    return self.next();
-                }
-            }
+    fn in_range(&self, position: Vec2) -> bool {
+        position.x >= self.center.x - self.radius &&
+            position.x < self.center.x + self.radius &&
+            position.y >= self.center.y - self.radius &&
+            position.y < self.center.y + self.radius
     }
 }
 
 
+// TODO: Hide this hebind Iterator trait
+pub struct SpatialHashmapIterator<'a, Q: Query> {
+    query: Q,
+    current_cell: IVec2,
+    entity_iterator: Option<hash_map::Iter<'a, Entity, Vec2>>,
+    shm: &'a HashMap<IVec2, HashMap<Entity, Vec2>>,
+    grid: Grid,
+}
 
+
+impl<'a, Q> Iterator for SpatialHashmapIterator<'a, Q> where Q: Query {
+    type Item = (Entity, Vec2);
+
+    fn next(&mut self) -> Option<Self::Item> {
+
+        // If we have an entity iterator (i.e. we are in a valid cell),
+        // iterate until we find an entity that is in range or the iterator is exhausted.
+
+        if let Some(mut it) = self.entity_iterator.take() {
+            while let Some((&entity, &pos)) = it.next() {
+                if self.query.in_range(pos) {
+                    // put back the iterator for next time
+                    self.entity_iterator = Some(it);
+                    return Some((entity, pos));
+                }
+            }
+
+            // No point in putting back an exhausted iterator
+            //self.entity_iterator = Some(it);
+        }
+
+        // Is there a next cell we should be looking at?
+        while let Some(next_cell) = self.query.next_cell(self.current_cell, self.grid) {
+            self.current_cell = next_cell;
+            if let Some(entities) = self.shm.get(&self.current_cell) {
+                self.entity_iterator = Some(entities.iter());
+                return self.next();
+            }
+        }
+
+        // No cells left to check, we have seen it all!
+        None
+    }
+}
+
+#[derive(Debug)]
 pub struct SpatialHashmap {
-    grid_size: f32,
-    hashmap: HashMap<IVec2, HashSet<Entity>>,
+    pub grid: Grid,
+    hashmap: HashMap<IVec2, HashMap<Entity, Vec2>>,
 }
 
 impl SpatialHashmap {
 
+    pub fn new(grid_size: f32) -> Self {
+        Self {
+            grid: Grid { spacing: grid_size },
+            hashmap: default()
+        }
+    }
+
     pub fn insert(&mut self, position: Vec2, entity: Entity) {
-        let index = grid_index(position);
+        let index = self.grid.index2d(position);
         self.hashmap
             .entry(index)
             .or_insert(default())
-            .insert(entity)
+            .insert(entity, position);
+    }
+
+    pub fn update(&mut self, entity: Entity, previous_position: Vec2, new_position: Vec2) {
+        let prev_index = self.grid.index2d(previous_position);
+        let new_index = self.grid.index2d(new_position);
+
+        if new_index != prev_index {
+            // If old cell exists, remove entry from it
+            self.hashmap.entry(prev_index).and_modify(|h| { h.remove(&entity); });
+        }
+
+        // Ensure new cell exists and insert entity into it
+        self.hashmap.entry(new_index)
+            .or_default()
+            .insert(entity, new_position);
+
     }
 
     pub fn remove(&mut self, position: Vec2, entity: Entity) {
-        let index = grid_index(position);
+        let index = self.grid.index2d(position);
         self.hashmap
             .entry(index)
             .or_insert(default())
-            .remove(entity)
+            .remove(&entity);
     }
 
-    pub fn query_square(&self, position: Vec2, radius: f32) {
+    pub fn query<Q: Query>(&self, query: Q) -> SpatialHashmapIterator<'_, Q> {
+        let first_cell = query.first_cell(self.grid);
 
+        SpatialHashmapIterator {
+            query,
+            current_cell: first_cell,
+            entity_iterator: self.hashmap.get(&first_cell).map(|x| x.iter()),
+            shm: &self.hashmap,
+            grid: self.grid,
+        }
     }
 
-    fn point_in_square(point: Vec2, square_center: Vec2, square_radius: f32) -> bool {
-        point.0 >= square_center.0 - radius &&
-            point.0 <= square_center.0 + radius &&
-            point.1 >= square_center.1 - radius &&
-            point.1 <= square_center.1 + radius
-    }
-
-    fn round(ordinate: f32) -> i32 {
-        floor(ordinate / grid_size)
-    }
-
-    fn grid_index(position: Vec2) -> IVec2 {
-        ivec2(
-            round(position.0),
-            round(position.1)
-        )
-    }
 }
+
