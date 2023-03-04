@@ -12,6 +12,7 @@ bevy = "0.9.0"
 rand = "*"
 bevy_diagnostic = "*"
 bevy_prototype_debug_lines = "0.9"
+clap = { version = "4.1.*", features = ["derive"] }
 
 [lib]
 name = "bevy_spatial_hashing"
@@ -19,4 +20,4 @@ path = "src/lib.rs"
 
 [[example]]
 name = "simple"
-path = "examples/simple.rs"
+path = "examples/benchmark.rs"

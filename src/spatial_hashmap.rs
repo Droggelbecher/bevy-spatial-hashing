@@ -8,19 +8,12 @@ use bevy::{
     math::{vec2, ivec2},
 };
 
-// TODO: Better names
-// TODO: Decouple this from bevy by making IVec2 and Vec2 usages generic somehow?
-
 #[derive(Debug, Clone, Copy)]
 pub struct Grid {
-    // TODO: Currently we happily copy this around,
-    // if this should become bigger (i.e includes boundaries etc.. instead we should pass
-    // reference to it)
     pub spacing: f32
 }
 
 impl Grid {
-
     fn index1d(&self, ordinate: f32) -> i32 {
         (ordinate / self.spacing).floor() as i32
     }
