@@ -7,24 +7,26 @@ use bevy::app::AppExit;
 use bevy::{app::ScheduleRunnerSettings, log::LogPlugin, math::vec2, prelude::*, utils::Duration};
 use bevy_spatial_hashing::spatial_hashmap::{SpatialHashmap, SquareQuery};
 
-const N_CIRCLES: i32 = 10000;
-const BOTTOM_LEFT: Vec2 = vec2(-950., -500.);
-const TOP_RIGHT: Vec2 = vec2(950., 500.);
-const MIN_SPEED: Vec2 = vec2(-20., -20.);
-const MAX_SPEED: Vec2 = vec2(20., 20.);
+const BOTTOM_LEFT: Vec2 = vec2(-1000., -500.);
+const TOP_RIGHT: Vec2 = vec2(1000., 500.);
 
 const FPS_INTERVAL: f32 = 1.0_f32;
-const N_FPS_ROUNDS: i32 = 10;
 
 #[derive(Debug, Resource, Parser)]
 #[command(author, version, about, long_about = None)]
 struct Experiment {
     #[arg(short, long)]
-    collision_radius: f32,
+    query_radius: f32,
     #[arg(short, long)]
     grid_size: Option<f32>,
+    #[arg(short, long, default_value_t=10.0)]
+    v_max: f32,
+    #[arg(short, long, default_value_t=10000)]
+    points: i32,
+    #[arg(short, long, default_value_t=10)]
+    rounds: i32,
     #[arg(short, long)]
-    use_shm: bool,
+    shm: bool,
 }
 
 fn main() {
@@ -43,7 +45,7 @@ fn main() {
         .add_startup_system(startup)
         .add_system(update_locations);
 
-    if experiment.use_shm {
+    if experiment.shm {
         app = app.add_system(collide_shm)
             .insert_resource(SHM {
                 shm: SpatialHashmap::new(experiment.grid_size.unwrap())
@@ -53,7 +55,10 @@ fn main() {
     }
 
     app.add_system(fps)
-        .insert_resource(ExperimentState::default())
+        .insert_resource(ExperimentState {
+            frame_count: 0,
+            rounds_left: experiment.rounds
+        })
         .insert_resource(experiment)
         .run();
 }
@@ -77,23 +82,14 @@ struct ExperimentState {
     rounds_left: i32,
 }
 
-impl Default for ExperimentState {
-    fn default() -> Self {
-        ExperimentState {
-            frame_count: 0,
-            rounds_left: N_FPS_ROUNDS,
-        }
-    }
-}
-
-fn startup(mut commands: Commands, mut shm: Option<ResMut<SHM>>) {
+fn startup(mut commands: Commands, mut shm: Option<ResMut<SHM>>, experiment: Res<Experiment>) {
     let mut rng = StdRng::seed_from_u64(123);
 
-    for _ in 0..N_CIRCLES {
+    for _ in 0..experiment.points {
         let x = rng.gen_range(BOTTOM_LEFT.x..TOP_RIGHT.x);
         let y = rng.gen_range(BOTTOM_LEFT.y..TOP_RIGHT.y);
-        let vx = rng.gen_range(MIN_SPEED.x..MAX_SPEED.x);
-        let vy = rng.gen_range(MIN_SPEED.y..MAX_SPEED.y);
+        let vx = rng.gen_range(-experiment.v_max..experiment.v_max);
+        let vy = rng.gen_range(-experiment.v_max..experiment.v_max);
 
         let entity = commands.spawn((
             Transform::from_translation(Vec3::new(x, y, 0.)),
@@ -122,10 +118,11 @@ fn fps(
         if timer.tick(time.delta()).just_finished() {
             {
                 println!(
-                    "{}, {}, {}",
-                    if experiment.use_shm { experiment.grid_size.unwrap() } else { -1.0_f32 },
-                    experiment.collision_radius,
-                    FPS_INTERVAL / (state.frame_count as f32)
+                    "{}, {}, {}, {}",
+                    if experiment.shm { experiment.grid_size.unwrap() } else { -1.0_f32 },
+                    experiment.query_radius,
+                    FPS_INTERVAL / (state.frame_count as f32),
+                    experiment.points
                 );
             }
             state.frame_count = 0;
@@ -147,7 +144,7 @@ fn update_locations(
     for (entity, mut transform, mut speed) in &mut moving {
         let new_translation = transform.translation + speed.v.extend(0.0) * time.delta_seconds();
 
-        if experiment.use_shm {
+        if experiment.shm {
             shm.as_mut().unwrap().shm.update(
                 entity,
                 transform.translation.truncate(),
@@ -171,9 +168,9 @@ fn collide_naive(moving: Query<&Transform>, experiment: Res<Experiment>) {
     for transform in moving.iter() {
         for transform2 in moving.iter() {
             if (transform.translation.x - transform2.translation.x).abs()
-                < experiment.collision_radius
+                < experiment.query_radius
                 && (transform.translation.y - transform2.translation.y).abs()
-                    < experiment.collision_radius
+                    < experiment.query_radius
             {
                 // Pretend to do something with the neighbor position so this doesnt get optimized
                 // out
@@ -187,7 +184,7 @@ fn collide_shm(moving: Query<&Transform>, shm: ResMut<SHM>, experiment: Res<Expe
     for transform in moving.iter() {
         let query = SquareQuery::new(
             transform.translation.truncate(),
-            experiment.collision_radius,
+            experiment.query_radius,
         );
 
         // Count neighbors

@@ -19,5 +19,5 @@ name = "bevy_spatial_hashing"
 path = "src/lib.rs"
 
 [[example]]
-name = "simple"
+name = "benchmark"
 path = "examples/benchmark.rs"
